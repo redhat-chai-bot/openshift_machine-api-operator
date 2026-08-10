@@ -6,7 +6,7 @@ RUN NO_DOCKER=1 make build && \
     cp /go/src/github.com/openshift/machine-api-operator/bin/machine-api-tests-ext /tmp/build/machine-api-tests-ext && \
     gzip /tmp/build/machine-api-tests-ext
 
-FROM registry.ci.openshift.org/openshift/origin-v4.0:base
+FROM quay-proxy.ci.openshift.org/openshift/ci:openshift_origin-v4.0_base
 COPY --from=builder /go/src/github.com/openshift/machine-api-operator/install manifests
 COPY --from=builder /go/src/github.com/openshift/machine-api-operator/bin/machine-api-operator .
 COPY --from=builder /go/src/github.com/openshift/machine-api-operator/bin/nodelink-controller .
