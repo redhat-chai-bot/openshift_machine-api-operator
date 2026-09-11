@@ -181,12 +181,28 @@ func (r *Reconciler) create() error {
 
 	moTask, err := r.session.GetTask(r.Context, r.providerStatus.TaskRef)
 	if err != nil {
-		metrics.RegisterFailedInstanceCreate(&metrics.MachineLabels{
-			Name:      r.machine.Name,
-			Namespace: r.machine.Namespace,
-			Reason:    "GetTask finished with error",
-		})
-		return err
+		if !isRetrieveMONotFound(r.providerStatus.TaskRef, err) {
+			metrics.RegisterFailedInstanceCreate(&metrics.MachineLabels{
+				Name:      r.machine.Name,
+				Namespace: r.machine.Namespace,
+				Reason:    "GetTask finished with error",
+			})
+			return err
+		}
+		// Task history eviction or a session restart can make a task
+		// ref permanently unavailable. Clear it and check whether the
+		// VM was already created so the next reconcile can proceed.
+		klog.Infof("%v: task %s no longer found, clearing TaskRef", r.machine.GetName(), r.providerStatus.TaskRef)
+		r.providerStatus.TaskRef = ""
+		if _, findErr := findVM(r.machineScope); findErr != nil {
+			if isNotFound(findErr) {
+				// VM was never created – retry clone on next reconcile.
+				return nil
+			}
+			return findErr
+		}
+		// VM exists – let the next reconcile handle it via update.
+		return nil
 	}
 
 	if moTask == nil {
@@ -1465,6 +1481,12 @@ func setProviderStatus(taskRef string, condition metav1.Condition, scope *machin
 	klog.Infof("%s: Updating provider status", scope.machine.Name)
 
 	if vm != nil {
+		// Guard: InstanceID is set exactly once – on the first call after
+		// a VM becomes available – and never overwritten. This prevents an
+		// API‐server round-trip from resetting the identity of a Machine
+		// whose VM was replaced (e.g. a re-clone after a failed create),
+		// because the clearing of InstanceID before clone (see create())
+		// is what signals that a new identity is expected.
 		if scope.providerStatus.InstanceID == nil || *scope.providerStatus.InstanceID == "" {
 			id := vm.Obj.UUID(scope.Context)
 			scope.providerStatus.InstanceID = &id
@@ -1591,6 +1613,9 @@ func (vm *virtualMachine) powerOnVM() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Invalidate the cached power state so the next getPowerState call
+	// reflects the actual VM state after the power-on operation.
+	vm.psKnown = false
 	return task.Reference().Value, nil
 }
 
@@ -1599,6 +1624,9 @@ func (vm *virtualMachine) powerOffVM() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Invalidate the cached power state so the next getPowerState call
+	// reflects the actual VM state after the power-off operation.
+	vm.psKnown = false
 	return task.Reference().Value, nil
 }
 

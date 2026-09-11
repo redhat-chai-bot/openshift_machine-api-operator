@@ -3789,27 +3789,127 @@ func TestReconcileProviderIDSkipsWhenSet(t *testing.T) {
 	}
 }
 
+func TestIsRetrieveMONotFound(t *testing.T) {
+	const taskRef = "task-12345"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "unrelated error",
+			err:  fmt.Errorf("connection refused"),
+			want: false,
+		},
+		{
+			name: "specific task deleted",
+			err:  fmt.Errorf("ServerFaultCode: The object 'vim.Task:%s' has already been deleted or has not been completely created", taskRef),
+			want: true,
+		},
+		{
+			name: "generic object deleted",
+			err:  fmt.Errorf("ServerFaultCode: The object has already been deleted or has not been completely created"),
+			want: true,
+		},
+		{
+			name: "wrong task ref in message",
+			err:  fmt.Errorf("ServerFaultCode: The object 'vim.Task:task-other' has already been deleted or has not been completely created"),
+			want: false,
+		},
+		{
+			name: "partial match is not enough",
+			err:  fmt.Errorf("ServerFaultCode: The object 'vim.Task:%s' has already been deleted", taskRef),
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isRetrieveMONotFound(taskRef, tc.err)
+			if got != tc.want {
+				t.Errorf("isRetrieveMONotFound(%q, %v) = %v, want %v", taskRef, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetPowerStateCachedWithinPass(t *testing.T) {
-	_, sess, server := initSimulator(t)
+	model, sess, server := initSimulator(t)
+	defer model.Remove()
 	defer server.Close()
 	ctx := context.Background()
 
-	vmObj, err := sess.Finder.VirtualMachine(ctx, "DC0/host/DC0_H0/VM0")
-	if err != nil {
-		// adjust inventory path to the sim topology used by this suite
-		t.Skipf("no default VM in sim: %v", err)
-	}
-	vm := &virtualMachine{Context: ctx, Obj: vmObj, Ref: vmObj.Reference()}
+	simVM := model.Map().Any("VirtualMachine").(*simulator.VirtualMachine)
+	vmObj := object.NewVirtualMachine(sess.Client.Client, simVM.Reference())
+	vm := &virtualMachine{Context: ctx, Obj: vmObj, Ref: simVM.Reference()}
 
+	// First call populates the cache.
 	first, err := vm.getPowerState()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Change the simulator-side state so a non-caching implementation
+	// would observe a different power state.
+	simVM.Runtime.PowerState = types.VirtualMachinePowerStateSuspended
+
+	// Second call must still return the cached value, proving the cache
+	// is used instead of hitting the simulator again.
 	second, err := vm.getPowerState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second {
-		t.Errorf("cached and fresh power states differ: %s vs %s", first, second)
+	if second != first {
+		t.Errorf("second getPowerState returned %s; want cached %s", second, first)
+	}
+}
+
+func TestPowerOffVMInvalidatesCache(t *testing.T) {
+	model, sess, server := initSimulator(t)
+	defer model.Remove()
+	defer server.Close()
+	ctx := context.Background()
+
+	simVM := model.Map().Any("VirtualMachine").(*simulator.VirtualMachine)
+	vmObj := object.NewVirtualMachine(sess.Client.Client, simVM.Reference())
+	vm := &virtualMachine{Context: ctx, Obj: vmObj, Ref: simVM.Reference()}
+
+	// Populate the cache with poweredOn.
+	first, err := vm.getPowerState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != types.VirtualMachinePowerStatePoweredOn {
+		t.Fatalf("expected poweredOn, got %s", first)
+	}
+
+	// powerOffVM must invalidate the cache.
+	taskRef, err := vm.powerOffVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskRef == "" {
+		t.Fatal("powerOffVM returned empty taskRef")
+	}
+
+	// Wait for the power-off task to complete in the simulator.
+	taskObj := object.NewTask(sess.Client.Client, types.ManagedObjectReference{
+		Type: "Task", Value: taskRef,
+	})
+	if err := taskObj.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// After powerOffVM, the cache must be cleared so the next call
+	// fetches the real (poweredOff) state from the simulator.
+	got, err := vm.getPowerState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != types.VirtualMachinePowerStatePoweredOff {
+		t.Errorf("after powerOffVM, getPowerState = %s; want poweredOff", got)
 	}
 }

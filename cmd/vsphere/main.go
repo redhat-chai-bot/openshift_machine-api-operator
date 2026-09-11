@@ -36,12 +36,24 @@ import (
 
 const syncPeriod = 30 * time.Minute
 
+const maxConcurrentReconcilesLimit = 100
+
 // registerControllerFlags registers machine controller tuning flags on fs.
 func registerControllerFlags(fs *flag.FlagSet) *int {
 	return fs.Int("max-concurrent-reconciles", 10,
-		"Maximum number of parallel Machine reconciles. Higher values drain a "+
-			"cluster faster but issue the same vCenter calls faster; keep 10 for "+
-			"shared vCenter environments.")
+		"Maximum number of parallel Machine reconciles (1–100). Higher values "+
+			"drain a cluster faster but issue the same vCenter calls faster; "+
+			"keep 10 for shared vCenter environments.")
+}
+
+// validateMaxConcurrentReconciles ensures the value is within safe bounds
+// (1–maxConcurrentReconcilesLimit). Zero starts no workers; negative values
+// panic in sync.WaitGroup; excessively large values exhaust process resources.
+func validateMaxConcurrentReconciles(v int) error {
+	if v < 1 || v > maxConcurrentReconcilesLimit {
+		return fmt.Errorf("--max-concurrent-reconciles=%d out of range [1, %d]", v, maxConcurrentReconcilesLimit)
+	}
+	return nil
 }
 
 func main() {
@@ -130,6 +142,10 @@ func main() {
 	if printVersion {
 		fmt.Println(version.String)
 		os.Exit(0)
+	}
+
+	if err := validateMaxConcurrentReconciles(*maxConcurrentReconciles); err != nil {
+		klog.Fatalf("Invalid flag value: %v", err)
 	}
 
 	cfg := config.GetConfigOrDie()

@@ -35,3 +35,25 @@ func TestMaxConcurrentReconcilesCustom(t *testing.T) {
 		t.Errorf("expected max-concurrent-reconciles = 5, got %d", *maxConcurrent)
 	}
 }
+
+func TestValidateMaxConcurrentReconciles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "negative", value: -1, wantErr: true},
+		{name: "zero", value: 0, wantErr: true},
+		{name: "minimum valid", value: 1, wantErr: false},
+		{name: "default", value: 10, wantErr: false},
+		{name: "max valid", value: maxConcurrentReconcilesLimit, wantErr: false},
+		{name: "over limit", value: maxConcurrentReconcilesLimit + 1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMaxConcurrentReconciles(tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateMaxConcurrentReconciles(%d) error = %v, wantErr %v", tc.value, err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -433,13 +433,48 @@ func TestTaskIDCacheConcurrentAccess(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func(i int) {
 			defer wg.Done()
-			machineName := fmt.Sprintf("machine-%d", i)
-			actuator.setTaskID(machineName, "task")
-			if taskID, ok := actuator.getTaskID(machineName); !ok || taskID != "task" {
-				t.Errorf("getTaskID(%q) = %q, %t; want task, true", machineName, taskID, ok)
+			m := &machinev1.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("machine-%d", i),
+					Namespace: "test-ns",
+				},
 			}
-			actuator.clearTaskID(machineName)
+			actuator.setTaskID(m, "task")
+			if taskID, ok := actuator.getTaskID(m); !ok || taskID != "task" {
+				t.Errorf("getTaskID(%q) = %q, %t; want task, true", m.Name, taskID, ok)
+			}
+			actuator.clearTaskID(m)
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestTaskIDCacheNamespaceIsolation(t *testing.T) {
+	actuator := &Actuator{TaskIDCache: make(map[string]string)}
+
+	machineA := &machinev1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "same-name", Namespace: "ns-a"},
+	}
+	machineB := &machinev1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "same-name", Namespace: "ns-b"},
+	}
+
+	actuator.setTaskID(machineA, "task-a")
+	actuator.setTaskID(machineB, "task-b")
+
+	if val, ok := actuator.getTaskID(machineA); !ok || val != "task-a" {
+		t.Errorf("expected task-a for ns-a/same-name, got %q", val)
+	}
+	if val, ok := actuator.getTaskID(machineB); !ok || val != "task-b" {
+		t.Errorf("expected task-b for ns-b/same-name, got %q", val)
+	}
+
+	// Clearing one must not affect the other.
+	actuator.clearTaskID(machineA)
+	if _, ok := actuator.getTaskID(machineA); ok {
+		t.Error("expected ns-a/same-name to be cleared")
+	}
+	if val, ok := actuator.getTaskID(machineB); !ok || val != "task-b" {
+		t.Errorf("clearing ns-a must not affect ns-b, got %q", val)
+	}
 }
